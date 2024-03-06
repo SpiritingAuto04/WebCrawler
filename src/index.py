@@ -4,11 +4,13 @@ import time
 import urllib.parse
 import urllib.request
 
-from bs4 import BeautifulSoup as BS, BeautifulSoup
+from helpers import fetch, fetch_url
+from bs4 import BeautifulSoup as BS
 from pymongo import MongoClient
-from pymongo.errors import DuplicateKeyError
+from pymongo.errors import DuplicateKeyError, BulkWriteError
 from conf import usr, passw, ip
 from datetime import datetime, timezone
+from requests.exceptions import TooManyRedirects
 
 
 class DataBase:
@@ -37,7 +39,7 @@ class Crawler:
 
         self.__locked_domain = domain
 
-    def run(self) -> tuple[list[str], BeautifulSoup | None]:
+    def run(self) -> tuple[list[str], BS | None]:
         if len(self.__working) == 0:
             raise self.EndOfWorkload("No more work found.")
 
@@ -56,14 +58,14 @@ class Crawler:
         except Exception:
             return None
 
-        if resp.status_code != 200:
-            return None
+        '''if resp.status_code != 200:
+            return None'''
 
         soup = BS(resp.text, 'html.parser')
 
         for url in soup.find_all('a', href=True):
-            '''if not url.get("href"):
-                continue'''
+            if not url.get("href"):
+                continue
 
             u = urllib.parse.urljoin(resp.url, url.get("href"))
 
@@ -104,9 +106,59 @@ if __name__ == '__main__':
 
         time.sleep(1)
 
-        '''for u in DataBase.INGESTED.find():
-            if not DataBase.INGESTED:
-                try:
-                    DataBase.INGESTED.insert_one(p)
-                except DuplicateKeyError:
-                    pass'''
+        ent = DataBase.QUEUE.find_one_and_delete({})
+
+        if ent is None:
+            continue
+
+        link = ent["url"]
+
+        if DataBase.INGESTED.count_documents({"url": link}) > 0:
+            continue
+
+        response = fetch(link, DataBase.USER_AGENT)
+        pageCont = response.__str__()
+        statCode = response
+
+        subDomain, topDomain, fullDomain = fetch_url(link)
+
+        Beauti = BS(pageCont, "html.parser")
+        soupEle = Beauti.find_all('a')
+
+        pLink = [
+            {"url": u["href"]}
+            for u in soupEle
+            if u.has_attr("href")
+            if u["href"].startswith("http")
+        ]
+
+        try:
+            DataBase.INGESTED.insert_one({
+                "url": link,
+                "status": {
+                    "code": statCode[0],
+                    "message": str(statCode[1])
+                },
+                "domains": {
+                    "sub": subDomain,
+                    "top": topDomain,
+                    "full": fullDomain
+                }
+            })
+        except DuplicateKeyError:
+            pass
+
+        if isinstance(statCode[0] != 200, TooManyRedirects):
+            subDomain = "Unsuccessful"
+            topDomain = "Unsuccessful"
+            fullDomain = ""
+
+        if len(pLink) == 0:
+            continue
+
+        try:
+            DataBase.QUEUE.insert_many(pLink, ordered=False)
+        except BulkWriteError:
+            pass
+        except TooManyRedirects:
+            pass
