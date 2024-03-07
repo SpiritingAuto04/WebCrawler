@@ -1,16 +1,11 @@
 import threading
-import requests
-import time
-import urllib.parse
-import urllib.request
 
-from helpers import fetch, fetch_url
-from bs4 import BeautifulSoup as BS
-from pymongo import MongoClient
-from pymongo.errors import DuplicateKeyError, BulkWriteError
-from conf import usr, passw, ip
 from datetime import datetime, timezone
-from requests.exceptions import TooManyRedirects
+from helpers import fetch, fetch_url
+from pymongo import MongoClient
+from conf import usr, passw, ip
+from time import sleep
+from random import randint
 
 
 class DataBase:
@@ -29,136 +24,108 @@ class DataBase:
 
 
 class Crawler:
-    class EndOfWorkload(Exception):
-        pass
-
-    def __init__(self, start: list[str], domain: str | None = None):
-        self.__working = start
-
-        self.discovered = []
-
-        self.__locked_domain = domain
-
-    def run(self) -> tuple[list[str], BS | None]:
-        if len(self.__working) == 0:
-            raise self.EndOfWorkload("No more work found.")
-
-        current = self.__get_next()
-
-        return current, self.__scrape(current)
-
-    def __get_next(self) -> list[str]:
-        c = self.__working[0]
-        self.__working.pop(0)
-        return c
-
-    def __scrape(self, i: str) -> BS | None:
+    @staticmethod
+    def push_to_ingest(data: dict) -> None | Exception:
         try:
-            resp = requests.get(i)
-        except Exception:
+            DataBase.INGESTED.insert_one(data)
             return None
+        except Exception as e:
+            return e
 
-        '''if resp.status_code != 200:
-            return None'''
-
-        soup = BS(resp.text, 'html.parser')
-
-        for url in soup.find_all('a', href=True):
-            if not url.get("href"):
-                continue
-
-            u = urllib.parse.urljoin(resp.url, url.get("href"))
-
-            if self.__locked_domain and self.__locked_domain not in urllib.parse.urlparse(resp.url).netloc:
-                continue
-
-            if u in self.discovered:
-                continue
-
-            self.__working.append(u)
-
-        return soup
+    @staticmethod
+    def push_to_queue(items: list) -> None | Exception:
+        try:
+            DataBase.QUEUE.insert_many(items, ordered=False)
+        except Exception as e:
+            return e
 
 
-if __name__ == '__main__':
-    cr = Crawler(["https://google.com"])
-
+def crawler_thread(thread_id: int) -> None:
+    mutex = DataBase.DB_MUTEX
     while True:
-        url, soup = cr.run()
+        mutex.acquire()
 
-        '''if not soup:
-            continue'''
+        entry = DataBase.QUEUE.find_one_and_delete({})
 
-        print(f"{datetime.now(timezone.utc)} <- {url}")
-
-        p = {
-            "url": url,
-            "status": {
-                "online": True,
-                "error": "None"
-            }
-        }
-
-        try:
-            DataBase.QUEUE.insert_one(p)
-        except DuplicateKeyError:
-            pass
-
-        time.sleep(1)
-
-        ent = DataBase.QUEUE.find_one_and_delete({})
-
-        if ent is None:
+        if entry is None:
+            mutex.release()
+            print(f"Released {thread_id}")
             continue
 
-        link = ent["url"]
+        url = entry["url"]
 
-        if DataBase.INGESTED.count_documents({"url": link}) > 0:
+        if DataBase.INGESTED.count_documents({"url": url}) > 0:
+            mutex.release()
             continue
 
-        response = fetch(link, DataBase.USER_AGENT)
-        pageCont = response.__str__()
-        statCode = response
+        mutex.release()
+        resp = fetch(url, DataBase.USER_AGENT)
 
-        subDomain, topDomain, fullDomain = fetch_url(link)
+        if isinstance(resp[1], Exception):
+            Crawler.push_to_ingest(data={
+                "link": url,
+                "status": {"code": resp[0], "message": str(resp[2])},
+                "subDomain": "Undefined",
+                "topDomain": "Undefined",
+                "fullDomain": "Undefined",
 
-        Beauti = BS(pageCont, "html.parser")
-        soupEle = Beauti.find_all('a')
+            })
+            continue
 
-        pLink = [
-            {"url": u["href"]}
-            for u in soupEle
-            if u.has_attr("href")
-            if u["href"].startswith("http")
-        ]
-
-        try:
-            DataBase.INGESTED.insert_one({
-                "url": link,
-                "status": {
-                    "code": statCode[0],
-                    "message": str(statCode[1])
-                },
+        if "html" not in str(resp[2]):
+            Crawler.push_to_ingest({
+                "link": url,
+                "status": {"code": resp[0], "message": str(resp[2])},
                 "domains": {
-                    "sub": subDomain,
-                    "top": topDomain,
-                    "full": fullDomain
+                    "subDomain": "Undefined",
+                    "topDomain": "Undefined",
+                    "fullDomain": "Undefined"
                 }
             })
-        except DuplicateKeyError:
-            pass
-
-        if isinstance(statCode[0] != 200, TooManyRedirects):
-            subDomain = "Unsuccessful"
-            topDomain = "Unsuccessful"
-            fullDomain = ""
-
-        if len(pLink) == 0:
             continue
 
-        try:
-            DataBase.QUEUE.insert_many(pLink, ordered=False)
-        except BulkWriteError:
-            pass
-        except TooManyRedirects:
-            pass
+        linkedURLs = resp[3]
+        topDomain, subDomain, fullDomain = fetch_url(url)
+
+        Crawler.push_to_ingest({
+            "url": url,
+            "status": {"code": resp[0], "message": str(resp[2])},
+            "domains": {
+                "top": topDomain,
+                "sub": subDomain,
+                "full": fullDomain
+            }
+        })
+
+        queued_urls = [{
+            "link": fullDomain,
+            "url": url,
+            }
+            for url in linkedURLs
+        ]
+
+        print(f"Thread <{thread_id}> <-- {url}: \nIngested {len(queued_urls)} links to QUEUE @ {datetime.now(timezone.utc)}")
+
+        if len(queued_urls) > 0:
+            Crawler.push_to_queue(queued_urls)
+
+        sleep(randint(2, 10))
+
+
+def main():
+    threads = []
+
+    for thread_id in range(0, 10):
+        thread = threading.Thread(target=crawler_thread, args=(thread_id,))
+        thread.start()
+
+        threads.append(thread)
+
+    for thread in threads:
+        thread.join()
+
+# TODO Make it so it flows: if queue > 0: crawler goes 1st index domain otherwise start google.com
+
+
+if __name__ == "__main__":
+    main()

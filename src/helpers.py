@@ -1,32 +1,40 @@
+from typing import Any
 import requests
 
 from bs4 import BeautifulSoup as BS, Doctype as DT, Doctype
-from requests.exceptions import ReadTimeout, TooManyRedirects
+from urllib.parse import urljoin
 
 
-def fetch(url: str, user_agent: str) -> tuple[int, str] | tuple[None, Exception]:
+def fetch(url: str, user_agent: str) -> tuple[int, str, Doctype | str, list[str | Any]] | tuple[None, str, Exception]:
     try:
         resp = requests.get(url, headers={
             'User-Agent': user_agent
         }, timeout=5)
 
         Beauti = BS(resp.text, "html.parser")
-        header = [i for i in Beauti if isinstance(i, Doctype)]
+        header = [i for i in Beauti if isinstance(i, DT)]
         if header:
             header = header[0]
         else:
             header = "Undefined"
 
-        return resp.status_code, header
+        links = []
 
-    except ReadTimeout as RT:
-        return None, RT
+        for link in Beauti.find_all('a', href=True):
+            link = link.get("href")
 
-    except TooManyRedirects as TMR:
-        return None, TMR
+            if link.startswith("http"):
+                links.append(link)
+                continue
+
+            if link.startswith("/"):
+                links.append(urljoin(url, link))
+                continue
+
+        return resp.status_code, resp.text, header, links
 
     except Exception as e:
-        return None, e
+        return None, "Exception:", e
 
 
 def fetch_url(url: str):
@@ -42,7 +50,6 @@ def fetch_url(url: str):
 
     subDomain = part[1]
     topDomain = part[0]
-
     fullDomain = '.'.join(part[:-2] + part[-2:])
 
     return topDomain, subDomain, fullDomain
