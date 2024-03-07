@@ -1,1 +1,4 @@
 # WebCrawler
+
+# What is this project? 
+Well, this is a personal web crawler project I am making which uses Pymongo to connect to a Mongo database running as a Docker Container to store links that BeautifulSoup grabs from a website's HTML. The workflow allows the simple ingestion of the base url after it grabs all possible links from the webpage. It's not made to be replicated HOWEVER it can be replicated by downloading Python 3.12 and using PIP to install requirements. You would also then need to make your own config.json with a username, password and IP of the database. After that, you need to open `src/config.py` and change the json open to the path of your config file for it to run. After all that, it should run slowly since it's not currently threaded which is something I am working on adding right now. 
