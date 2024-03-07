@@ -124,8 +124,6 @@ def main():
     for thread in threads:
         thread.join()
 
-# TODO Make it so it flows: if queue > 0: crawler goes 1st index domain otherwise start google.com
-
 
 if __name__ == "__main__":
     main()
